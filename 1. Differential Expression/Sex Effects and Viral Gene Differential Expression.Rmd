@@ -1,0 +1,751 @@
+---
+title: "Differential Expression"
+author: "Timothy Smyth"
+date: "2025-06-09"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Clear the environment and import required packages
+
+```{r}
+rm(list = ls(all.names = TRUE)) # clears global environ.
+
+library(Biobase)
+library(variancePartition)
+library(BiocParallel)
+library(openxlsx)
+library(tidyverse)
+library(EnhancedVolcano)
+library(eulerr)
+library(ggplot2)
+```
+
+### Create functions for future visualization
+
+```{r}
+plot_volcano <- function(DEG_Input, Comparison_names, Top_Gene_Number, xlim, point_size, text_size, file_name){
+  
+  # Determine the number of significantly upregulated genes
+  up <- DEG_Input %>% count(log2FC >= 1.5 & adj.P.Val < 0.1)
+  
+  up <- as.numeric(up[2, 2])
+  
+  # Determine the number of significantly downregulated genes
+  down <- DEG_Input %>% count(log2FC <= -1.5 & adj.P.Val < 0.1)
+  
+  down <- as.numeric(down[2, 2])
+  
+  # Arrange rows by descending log2FC value
+  DEG_Input <- DEG_Input %>% arrange(desc(log2FC))
+  
+  # Replace empty HUGO IDs with Ensembl IDs
+  DEG_Input$GENE[DEG_Input$GENE == ''] = DEG_Input$GENEID[DEG_Input$GENE == '']
+  
+  # Isolate upregulated gene names
+  selectLab_up <- DEG_Input %>% 
+    subset(log2FC >= 1.5 & adj.P.Val < 0.1) %>% 
+    arrange(desc(log2FC)) %>% 
+    rownames()
+  
+  # Retain top upregulated genes
+  selectLab_up <- selectLab_up[1:Top_Gene_Number] %>% na.omit()
+  
+  # Isolate downregulated gene names
+  selectLab_down <- DEG_Input %>% 
+    subset(log2FC <= -1.5 & adj.P.Val < 0.1) %>% 
+    arrange(log2FC) %>% 
+    rownames()
+  
+  # Retain top downregulated genes
+  selectLab_down <- selectLab_down[1:Top_Gene_Number] %>% na.omit()
+  
+  selectLabs <- c(selectLab_up, selectLab_down)
+  
+  DEG_Input[!rownames(DEG_Input) %in% selectLabs, 'GENE'] <- ''
+  
+  # Remove labels for genes from X/Y chromosomes
+  DEG_Input[which(DEG_Input$CHR == 'X' | DEG_Input$CHR == 'Y'), 'GENE'] <- ''
+  
+  volcano <- EnhancedVolcano(DEG_Input,
+                             lab = DEG_Input$GENE,
+                             labSize = text_size,
+                             drawConnectors = TRUE,
+                             widthConnectors = 0.5,
+                             max.overlaps = Inf,
+                             maxoverlapsConnectors = Inf,
+                             boxedLabels = FALSE,
+                             x = 'log2FC',
+                             y = 'adj.P.Val',
+                             FCcutoff = 1.5,
+                             pCutoff = 0.1,
+                             title = Comparison_names,
+                             pointSize = point_size) 
+  
+  # Determine the y axis limit
+  max <- max(volcano[["plot_env"]][["ylim"]]) * 1.1
+  
+  # Add arrows and numbers describing the number of up or downregulated genes
+  volcano <- volcano + 
+    
+    # Set x axis from -10 to 10 and extend y axis
+    ggplot2::coord_cartesian(xlim = c(-xlim, xlim), 
+                             ylim = c(0, max)) +
+    
+    # Place downregulated numbers on plot
+    ggplot2::geom_text(x = -xlim * 0.75,
+                       y = max* 0.95,
+                       label = paste0(down),
+                       size = 8.5) +
+    
+    # Place downregulation arrow on plot
+    ggplot2::geom_segment(x = -xlim * 0.95,
+                          y = max,
+                          xend = -xlim * 0.95,
+                          yend = max * 0.9,
+                          arrow = arrow(length = unit(2, "mm")), 
+                          linewidth = 1) +
+    
+    # Place upregulated numbers on plot
+    ggplot2::geom_text(x = xlim * 0.75,
+                       y = max * 0.95,
+                       label = paste0(up),
+                       size = 8.5) + 
+    
+    # Place upregulation arrow on plot
+    ggplot2::geom_segment(x = xlim * 0.6,
+                          y = max * 0.9,
+                          xend = xlim * 0.6,
+                          yend = max,
+                          arrow = arrow(length = unit(2, "mm")), 
+                          linewidth = 1)
+  
+  # Save the resulting plot
+  tiff(paste0(file_name, '.tiff'),
+       units = "cm",
+       width = 18,
+       height = 16,
+       res = 300)
+
+  print(volcano)
+
+  dev.off()
+  
+}
+
+#############
+
+make_euler <- function(Input_list, Plot_name){
+  
+  # Will isolate upregulated and downregulated genes for separate plots
+  list_direction <- list('Up', 'Down')
+  
+  # Create euler plots for up or downregulated genes
+  lapply(list_direction, function(y){
+    
+    # Create list containing unique gene names from each group
+    # This list has only up or downregulated genes at a given time
+    eul_list <- list()
+    
+    for (i in 1:length(Input_list)){
+      
+      eul_list[[i]] <- unique(Input_list[[i]][[y]])
+      
+    }
+    
+    
+    # Set names of list to match source group
+    names(eul_list) <- names(Input_list)
+    
+    # Define colors for euler plots
+    colors <- c('blue3',
+                'khaki3',
+                'firebrick3',
+                'purple3',
+                'seagreen3',
+                'darkorange3', 
+                
+                'antiquewhite3', 
+                'cornflowerblue', 
+                'darkslategray3', 
+                'lightpink2')
+    
+    # Set group colors
+    col <- colors[1:length(eul_list)]
+    
+    # Fit the euler plot
+    fit <- euler(eul_list)
+    
+    # Add fills, legend, text size, axis limits
+    fit <- plot(fit,
+                fills = list(fill = col, alpha = 0.5),
+                legend = list(side = 'bottom', col = col, text.col = 'black'),
+                quantities = list(cex = 1), 
+                # lty = 2:1,
+                edges = 1,
+                # labels = list(font = 4),
+                main = paste0(y, 'regulated Genes ', Plot_name),
+                xlim = c(-15, 15), 
+                ylim = c(-15, 15))
+    
+    # Export as a tiff
+    tiff(paste0(y, 'regulated ', Plot_name, ' .tiff'),
+         units = "in",
+         width = 7,
+         height = 5.5,
+         res = 300)
+
+    print(fit)
+
+    dev.off()
+    
+    ##################################################################################################
+    # Determine the genes present within each section of overlap and output gene lists as a csv file #
+    ##################################################################################################
+    
+    # Defining overlap of genes can be easily done using ggVennDiagram functions
+    Overlap_venn <- ggVennDiagram:::Venn(eul_list) %>% ggVennDiagram::process_data()
+    
+    # Isolate genes unique to each group and combine to one data frame, removing NA values
+    # generated from combining unequal length vectors into one data frame
+    Gene_overlap <- Overlap_venn[["regionLabel"]][["item"]]
+    Gene_overlap <- do.call(qpcR:::cbind.na, Gene_overlap) %>% data.frame()
+    Gene_overlap[is.na(Gene_overlap)] <- ''
+    
+    # Rename to define overlapping groups
+    names(Gene_overlap) <- Overlap_venn[["regionLabel"]][["name"]]
+    
+    # write.csv(Gene_overlap, file = paste0(y, 'regulated ', Plot_name, '_Gene_Overlap.csv'))
+    
+    })
+}
+```
+
+### Import and format metadata and count data
+
+```{r}
+set.seed(12345)
+
+# Import metadata
+Metadata <- read.table("sample_info_full.txt", 
+                       sep = "\t", 
+                       header = T)
+
+# Set rownames to Sample ID
+rownames(Metadata) <- Metadata$SampleID
+
+# Set donor, timepoint, exposure, and infection to leveled factors
+Metadata$donor <- factor(Metadata$donor, 
+                         levels = c("1", "2", "3", "4", "5", "6", "7"))
+
+Metadata$timepoint <- factor(Metadata$timepoint, 
+                             levels = c("2", "24"))
+
+Metadata$sex <- factor(Metadata$sex, 
+                       levels = c("male", "female"))
+
+Metadata$exposure <- factor(Metadata$exposure, 
+                            levels = c("control", "winter", "summer", "spring", "fall"))
+
+Metadata$infection <- factor(Metadata$infection, 
+                             levels = c("mock", "virus"))
+
+# Creating categories for subgroup analysis
+Metadata$Group1 <- paste(Metadata$exposure, 
+                         Metadata$infection, 
+                         Metadata$timepoint, 
+                         sep = "_")
+
+Metadata$Group <- paste(Metadata$sex, 
+                         Metadata$exposure, 
+                         Metadata$infection, 
+                         Metadata$timepoint, 
+                         sep = "_")
+
+######################################################
+
+# Import count data
+count <- read.table("human_geneCount.txt", 
+                    sep = "\t", 
+                    header = T, 
+                    stringsAsFactors = F, 
+                    check.names = F, 
+                    quote = "")
+
+# Set rownames to ENSEMBL gene ID
+rownames(count) <- count$GENEID
+
+# Isolate gene metadata
+gene <- count[c(1:8)]
+
+# Remove single quote from gene description
+gene$DESCRIPTION <- gsub("\"",
+                         "", 
+                         gene$DESCRIPTION)
+
+# Remove gene metadata
+count <- as.matrix(count[-c(1:8)])
+
+# Rearrange count data to match metadata Sample ID order
+count <- count[, Metadata$SampleID]
+
+######################################################
+
+# Load transcript per million (TPM) data
+tpm <- read.table("human_gene_tpm.txt", 
+                  sep = "\t",
+                  header = T,
+                  stringsAsFactors = F, 
+                  check.names = F, 
+                  quote = "")
+
+# Set rownames to gene ID
+rownames(tpm) <- tpm$GENEID
+
+# Match row ordering to gene metadata
+tpm <- tpm[match(gene$GENEID, tpm$GENEID),]
+
+# Remove metadata
+tpm <- as.matrix(tpm[-c(1:8)])
+
+# Rearrange columns to match metadata Sample ID order
+tpm <- tpm[, Metadata$SampleID]
+
+########################################################################################
+### Preprocessing: quantile normalization, log transformation, filtering by mean TPM ###
+########################################################################################
+
+# Calculate gene wise counts
+sum <- rowSums(count)
+
+# Retain count data with minimal gene wise counts above 100
+count <- count[sum > 100, ]
+
+# Retain gene metadata with minimal gene wise counts above 100
+gene <- gene[sum > 100, ]
+
+# Retain tpm data with minimal gene wise counts above 100
+tpm <- tpm[sum > 100, ]
+```
+
+### Calculate group means and create metadata and gene objects for differential expression
+
+```{r}
+group <- levels(as.factor(Metadata$Group))
+
+# Create a matrix with dimmensions equal to number of genes and number of groups
+m <- matrix(NA, 
+             nrow = nrow(tpm), 
+             ncol = length(group))
+
+for (i in 1:length(group)) {
+  
+  # Isolate tpm data for a single group and calculate means for each gene
+  m[, i] <- rowMeans(tpm[, Metadata$Group == group[i]])
+  
+}
+
+# Set colnames to sample group
+colnames(m) <- paste(group, 
+                      "mean", 
+                      sep = "_")
+
+# Set rownames to gene name
+rownames(m) <- rownames(tpm)
+
+# Add metadata to mean counts
+ann <- cbind(gene, as.data.frame(m))
+
+# Construct gene expression object and do differential expression analysis
+MetadataData <- new("AnnotatedDataFrame", data = Metadata)
+geneAnnotation <- new("AnnotatedDataFrame", data = ann)
+
+# Create expression set object to be input for LIMMA analysis.
+eset <- ExpressionSet(assayData = count, MetadataenoData = MetadataData, featureData = geneAnnotation)
+
+# Define parameter for parallel processing
+param = SnowParam(10, "SOCK", progressbar = TRUE, exportglobals = FALSE)
+```
+
+### Create Supplemental Figure S1A-C
+
+```{r}
+# Create model for Variance Partition Model plot
+var_part_model <- ~(1|exposure) + (1|infection) + (1|timepoint) + (1|sex) + (1|donor)
+
+# Fit Variance Partition Model
+vp <- fitExtractVarPartModel(vm, var_part_model, Metadata)
+
+png('Supplemental_Figure_S1A.png', width = 4000, height = 2000, res = 300)
+
+# Plot model
+plotVarPart(sortCols(vp))
+
+dev.off()
+
+##########################################################
+
+# Create model for dream
+form <- ~0 + Group + (1|donor)
+
+# Building model matrix to observe group names for building contrasts
+design <- model.matrix(~0 + Group, data = Metadata)
+
+# Normalize data by voom with dream
+vm <- voomWithDreamWeights(eset, form, Metadata, BPPARAM = param)
+
+# Define contrasts to be tested
+contrasts <- makeContrastsDream(form,
+                                Metadata,
+                                contrasts = c(
+
+                                  ###############
+
+                                  Female.vs.Male.2h = "(Groupfemale_control_mock_2 + Groupfemale_control_virus_2 + Groupfemale_fall_mock_2 + Groupfemale_fall_virus_2 +
+                                                         Groupfemale_spring_mock_2 + Groupfemale_spring_virus_2 + Groupfemale_summer_mock_2 + Groupfemale_summer_virus_2 +
+                                                         Groupfemale_winter_mock_2 + Groupfemale_winter_virus_2)/10 -
+
+                                                       (Groupmale_control_mock_2 + Groupmale_control_virus_2 + Groupmale_fall_mock_2 + Groupmale_fall_virus_2 +
+                                                          Groupmale_spring_mock_2 + Groupmale_spring_virus_2 + Groupmale_summer_mock_2 + Groupmale_summer_virus_2 +
+                                                          Groupmale_winter_mock_2 + Groupmale_winter_virus_2)/10",
+
+                                  Female.vs.Male.24h = "(Groupfemale_control_mock_24 + Groupfemale_control_virus_24 + Groupfemale_fall_mock_24 + Groupfemale_fall_virus_24 +
+                                                          Groupfemale_spring_mock_24 + Groupfemale_spring_virus_24 + Groupfemale_summer_mock_24 + Groupfemale_summer_virus_24 +
+                                                          Groupfemale_winter_mock_24 + Groupfemale_winter_virus_24)/10 -
+
+                                                        (Groupmale_control_mock_24 + Groupmale_control_virus_24 + Groupmale_fall_mock_24 + Groupmale_fall_virus_24 +
+                                                          Groupmale_spring_mock_24 + Groupmale_spring_virus_24 + Groupmale_summer_mock_24 + Groupmale_summer_virus_24 +
+                                                          Groupmale_winter_mock_24 + Groupmale_winter_virus_24)/10"))
+
+# Fit model with dream weights
+fitmm <- dream(vm, form, Metadata, contrasts, ddf = "Satterthwaite", BPPARAM = param)
+
+# Empirical Bayes Statistics for Differential Expression
+fitmm <- eBayes(fitmm)
+
+##########################################################
+
+# Calculate DEGs
+Sex_DEGs <- lapply(colnames(contrasts), function(x){
+
+  topTable(fitmm, coef = x, sort.by = "P", n = Inf)
+
+})
+
+# Results are the following information:
+
+# logFC: log0 fold change of group1/group0
+# AveExpr: Average expression across all samples, in log2 CPM
+# t: logFC divided by its standard error
+# P.Value: Raw p-value (based on t) from test that logFC differs from 0
+# adj.P.Val: Benjamini-Hochberg false discovery rate adjusted p-value
+# B: log-odds that gene is DE
+
+# Isolate key DEG readouts
+Sex_DEG_Results <- lapply(Sex_DEGs, function(x){
+
+  tmp <- data.frame(cbind(x[["logFC"]],
+                          x[["P.Value"]],
+                          x[["adj.P.Val"]],
+                          x["AveExpr"]),
+                    row.names = rownames(x))
+
+  colnames(tmp) <- c('log2FC', 'P.Value', 'adj.P.Val', 'Expression')
+
+  tmp <- cbind(gene[rownames(tmp), c('GENEID', 'GENE', 'GENETYPE', 'DESCRIPTION', 'CHR')], tmp)
+
+})
+
+names(Sex_DEG_Results) <- c('Female vs Male, 2h', 'Female vs Male, 24h')
+  
+export_file_name <- c('Supplemental_Figure_S1B', 'Supplemental_Figure_S1C')
+
+##########################################################
+
+for(i in 1:length(Sex_DEG_Results)){
+
+  plot_volcano(DEG_Input = Sex_DEG_Results[[i]],
+               Comparison_names = names(Sex_DEG_Results)[[i]],
+               Top_Gene_Number = 50,
+               xlim = 10,
+               point_size = 4,
+               text_size = 5, 
+               file_name = export_file_name[[i]])
+
+}
+```
+
+### Import flu count data and metadata, isolate viral genes, and format for graphing
+
+```{r}
+# Import count data
+count <- read.table("human_flu_geneCount.txt", 
+                    sep = "\t", 
+                    header = T, 
+                    stringsAsFactors = F, 
+                    check.names = F, 
+                    quote = "")
+
+# Set rownames to ENSEMBL gene ID
+rownames(count) <- count$GENEID
+
+# Isolate gene metadata
+gene <- count[c(1:8)]
+
+# Remove single quote from gene description
+gene$DESCRIPTION <- gsub("\"",
+                         "", 
+                         gene$DESCRIPTION)
+
+# Remove gene metadata
+count <- as.matrix(count[-c(1:8)])
+
+# Rearrange count data to match metadata Sample ID order
+count <- count[, Metadata$SampleID]
+
+# Load transcript per million (TPM) data
+tpm <- read.table("human_flu_gene_tpm.txt", 
+                  sep = "\t",
+                  header = T,
+                  stringsAsFactors = F, 
+                  check.names = F, 
+                  quote = "")
+
+# Set rownames to gene ID
+rownames(tpm) <- tpm$GENEID
+
+# Match row ordering to gene metadata
+tpm <- tpm[match(gene$GENEID, tpm$GENEID),]
+
+# Remove metadata
+tpm <- as.matrix(tpm[-c(1:8)])
+
+# Rearrange columns to match metadata Sample ID order
+tpm <- tpm[, Metadata$SampleID]
+
+########################################################################################
+### Preprocessing: quantile normalization, log transformation, filtering by mean TPM ###
+########################################################################################
+
+# Calculate gene wise counts
+sum <- rowSums(count)
+
+# Retain count data with minimal gene wise counts above 100
+count <- count[sum > 100, ]
+
+# Retain gene metadata with minimal gene wise counts above 100
+gene <- gene[sum > 100, ]
+
+# Retain tpm data with minimal gene wise counts above 100
+tpm <- tpm[sum > 100, ]
+
+#######################################
+
+# Gene name for neuraminidase is NA. Set to NA to get around N/A assignment.
+gene['UJ99_s6gp1', 'GENE'] <- 'NA'
+
+# Isolate Influenza genes which have UJ99 ID
+gene <- gene[grep('UJ99', gene$GENEID), ]
+
+# Isolate virally infected sample metadata
+Metadata <- Metadata[which(Metadata$infection == 'virus'), ]
+
+# Isolate samples which had viral and PM exposure
+coexposure_tpm <- tpm[rownames(gene), rownames(Metadata)]
+
+# Isolate metadata of vehicle exposed, virally infected samples
+MvF <- Metadata[which(Metadata$exposure == 'control'), ]
+
+# Isolate TPM data for viral genes in isolated samples
+MvF_tpm <- tpm[rownames(gene), rownames(MvF)]
+
+# Rearrange data and set names
+MvF_tpm <- data.frame(MvF$sex, MvF$timepoint, t(MvF_tpm)) %>% setNames(c('Sex', 'Time', gene$GENE))
+
+# Pivot data longer
+MvF_tpm <- MvF_tpm %>% pivot_longer(cols = colnames(MvF_tpm)[3:ncol(MvF_tpm)], names_to = 'Gene', values_to = 'Count')
+
+# Set genes to factors for graphing
+MvF_tpm$Gene <- factor(MvF_tpm$Gene, 
+                       levels = c('PA-X', 'PA', 'PB1', 'PB2', 
+                                  'NA', 'NEP', 'M2', 'HA', 
+                                  'NP', 'M1', 'NS1'))
+
+# Calculate log10 of count data for visualization
+MvF_tpm$Count <- log(MvF_tpm$Count, 10) 
+```
+
+### Create Supplemental Figure S1D-E
+
+```{r}
+plot <- ggplot(data = MvF_tpm[which(MvF_tpm$Time == '2'), ], aes(x = Count, y = Gene, fill = Sex)) +
+  
+  geom_bar(stat = "summary", 
+           position = position_dodge(),
+           width = 0.75) + 
+  
+  geom_errorbar(stat = 'summary', 
+                width = 0.2, 
+                position=position_dodge(0.9)) +
+  
+  geom_point(stat = 'identity', 
+             position = position_dodge(0.9)) +
+  
+  labs(title = '2 Hour Viral Gene Counts', 
+       x = 'Log TPM') +
+  
+  xlim(-ceiling(abs(min(MvF_tpm$Count))), ceiling(abs(max(MvF_tpm$Count)))) +
+  
+  theme_bw() +
+
+  theme(axis.title = element_text(size = 20, face = 'bold'), 
+        title = element_text(size = 24, face = 'bold'),
+        axis.text = element_text(size = 18), 
+        legend.text = element_text(size = 14), 
+        legend.title = element_text(size = 16, face = "bold"))
+
+png(filename = 'Supplemental_Figure_S1D.png', width = 1000, height = 750)
+
+print(plot)
+
+dev.off()
+
+########################
+
+plot <- ggplot(data = MvF_tpm[which(MvF_tpm$Time == '24'), ], aes(x = Count, y = Gene, fill = Sex)) +
+  
+  geom_bar(stat = "summary", 
+           position = position_dodge(),
+           width = 0.75) + 
+  
+  geom_errorbar(stat = 'summary', 
+                width = 0.2, 
+                position=position_dodge(0.9)) +
+  
+  geom_point(stat = 'identity', 
+             position = position_dodge(0.9)) +
+  
+  labs(title = '24 Hour Viral Gene Counts', 
+       x = 'Log TPM') +
+  
+  xlim(-ceiling(abs(min(MvF_tpm$Count))), ceiling(abs(max(MvF_tpm$Count)))) +
+  
+  theme_bw() +
+  
+  theme(axis.title = element_text(size = 20, face = 'bold'), 
+        title = element_text(size = 24, face = 'bold'),
+        axis.text = element_text(size = 18), 
+        legend.text = element_text(size = 14), 
+        legend.title = element_text(size = 16, face = "bold"))
+
+png(filename = 'Supplemental_Figure_S1E.png', width = 1000, height = 750)
+
+print(plot)
+
+dev.off()
+```
+
+###
+
+```{r}
+group <- levels(as.factor(Metadata$Group1))
+
+# Create a matrix with dimmensions equal to number of genes and number of groups
+m <- matrix(NA, 
+            nrow = nrow(coexposure_tpm), 
+            ncol = length(group))
+
+for (i in 1:length(group)) {
+  
+  # Isolate tpm data for a single group and calculate means for each gene
+  m[, i] <- rowMeans(coexposure_tpm[, Metadata$Group1 == group[i]])
+  
+}
+
+# Set colnames to sample group
+colnames(m) <- paste(group, 
+                     "mean", 
+                     sep = "_")
+
+# Set rownames to gene name
+rownames(m) <- rownames(coexposure_tpm)
+
+# Add metadata to mean counts
+ann <- cbind(gene, as.data.frame(m))
+
+##########################################################
+
+# Construct gene expression object and do differential expression analysis
+MetadataData <- new("AnnotatedDataFrame", data = Metadata)
+geneAnnotation <- new("AnnotatedDataFrame", data = ann)
+
+# Create expression set object to be input for LIMMA analysis.
+eset <- ExpressionSet(assayData = coexposure_tpm, MetadataenoData = MetadataData, featureData = geneAnnotation)
+
+# Define parameter for parallel processing
+param = SnowParam(10, "SOCK", progressbar = TRUE, exportglobals = FALSE)
+```
+
+###
+
+```{r}
+# Create model for dream
+form <- ~0 + Group1 + (1|donor)
+
+# Normalize data by voom with dream
+vm <- voomWithDreamWeights(eset, form, Metadata, BPPARAM = param)
+
+# Define contrasts to be tested
+contrasts <- makeContrastsDream(form,
+                                Metadata,
+                                contrasts = c(
+                                  
+                                  Winter.2h = "Group1winter_virus_2 - Group1control_virus_2",
+                                  Spring.2h = "Group1spring_virus_2 - Group1control_virus_2",
+                                  Summer.2h = "Group1summer_virus_2 - Group1control_virus_2",
+                                  Fall.2h = "Group1fall_virus_2 - Group1control_virus_2", 
+                                  
+                                  ####
+                                  
+                                  Winter.24h = "Group1winter_virus_24 - Group1control_virus_24",
+                                  Spring.24h = "Group1spring_virus_24 - Group1control_virus_24",
+                                  Summer.24h = "Group1summer_virus_24 - Group1control_virus_24",
+                                  Fall.24h = "Group1fall_virus_24 - Group1control_virus_24"))
+
+# Fit model with dream weights
+fitmm <- dream(vm, form, Metadata, contrasts, ddf = "Satterthwaite", BPPARAM = param)
+
+# Empirical Bayes Statistics for Differential Expression
+fitmm <- eBayes(fitmm)
+
+# Calculate DEGs and format output
+DEGs <- lapply(colnames(contrasts), function(x){
+  
+  tmp <- topTable(fitmm, coef = x, sort.by = "P", n = Inf)
+  
+  tmp <- data.frame(tmp[["logFC"]], 
+                    tmp[["adj.P.Val"]], 
+                    row.names = rownames(tmp)) 
+  
+  tmp <- cbind(gene[rownames(tmp), c('GENE')], tmp) %>% 
+    
+    setNames(c('GENE', 
+               'Log2.FC', 
+             'adj.P.Val'))
+  
+  tmp <- data.frame(tmp[-1], 
+                    row.names = tmp$GENE)
+  
+})
+
+names(DEGs) <- colnames(contrasts)
+
+Results <- do.call(cbind, DEGs)
+
+colnames(Results) <- gsub('\\.', ' ', colnames(Results))
+
+write.csv(file = 'Supplemental_Table_S1.csv', Results)
+```

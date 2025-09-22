@@ -1,0 +1,504 @@
+---
+title: "Gene and Correlation Analysis Heatmaps"
+author: "Timothy Smyth"
+date: "2025-06-09"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Clear the environment and import required packages
+
+```{r}
+rm(list = ls(all.names = TRUE)) # clears global environ.
+
+library(tidyverse)
+library(ComplexHeatmap)
+library(circlize)
+```
+
+### Import and format PM chemistry data
+
+```{r}
+PM_Chemistry <- read.csv('Mass Fraction Data.csv')
+PM_Chemistry <- data.frame(PM_Chemistry[-1], row.names = PM_Chemistry$Chemical.Component)
+
+# Classify chemical components into specific chemical class
+Carbon <- c('Organic Carbon', 'Elemental Carbon')
+Inorganic <- c('Chloride', 'Fluoride', 'Bromide', 'Nitrate', 'Nitrite', 'Phosphate', 'Sulfate')
+Coal_linked <- c('Ti', 'Cr', 'Ni', 'Zn', 'As', 'Se', 'Cd', 'Sb', 'Pb') # Coal linked
+Alkali <- c('Li', 'Na', 'K', 'Rb', 'Cs') # Alkali
+Alkaline_earth <- c('Be', 'Mg', 'Ca', 'Sr', 'Ba') # Alkaline-earth
+Transition_metals <- c('V', 'Mn', 'Fe', 'Co', 'Cu', 'Mo', 'Ag', 'W') # Transition metals
+Rare_earth <- c('Y', 'La', 'Ce', 'Nd', 'Sm', 'Gd', 'Tb', 'Dy') # Rare earth/ianthanoid
+Other_metals <- c('Al', 'Ge', 'Sn', 'Tl', 'Bi') # Other metals
+Other_non_metals <- c('Si', 'P', 'S') # Other non-metals
+
+# Condense chemical class assignments into a single list and assign proper names
+Chemical_lists <- list(Carbon, Inorganic, Coal_linked, Alkali, Alkaline_earth, Transition_metals, Rare_earth, Other_metals, Other_non_metals)
+
+names(Chemical_lists) <- c('Carbon', 'Inorganic', 'Coal_linked', 'Alkali', 'Alkaline_earth', 'Transition_metals', 'Rare_earth', 'Other_metals', 'Other_non_metals')
+
+# Determine the total mass fraction for each chemical class
+Mass_Fraction_by_Group <- lapply(names(Chemical_lists), function(Single_Chemical_Group){
+  
+  Single_Group <- PM_Chemistry[rownames(PM_Chemistry) %in% Chemical_lists[[Single_Chemical_Group]], ]
+  Group_sum <- colSums(Single_Group)
+  
+})
+
+# Combine group data and assign season information
+Group_data <- data.frame(do.call(cbind, Mass_Fraction_by_Group)) %>% rownames_to_column() %>% setNames(c('exposure', names(Chemical_lists)))
+
+# Group_data[, 2:ncol(Group_data)] <- sapply(Group_data[, 2:ncol(Group_data)], as.numeric)
+```
+
+### Function to create combined DE and PM component correlation heatmaps and output differential expression information as supplemental files.
+
+```{r}
+Make_heatmap <- function(input_list, data_name, group_names, export_name){
+  
+  # Isolate genes which are differentially expressed in the current groups of interest
+  DEGs <- lapply(input_list, function(Single_Group){
+    
+    DEGs <- DEG_Results[[Single_Group]]
+    
+    DEGs <- DEGs %>% subset(adj.P.Val < 0.1 & (abs(log2FC) >= 1.5))
+    
+    DEGs$GENE[DEGs$GENE == ''] = DEGs$GENEID[DEGs$GENE == '']
+    
+    DEGs <- DEGs$GENE
+    
+  })
+  
+  # Combine results and remove duplicates
+  DEGs <- do.call(c, DEGs)
+  DEGs <- DEGs[!duplicated(DEGs)]
+  
+  ###############
+  
+  # Merge DEG data from DEG results data frames calculated in Differential Expression script
+  Merge_DEGs <- lapply(input_list, function(Single_Group){
+    
+    # Isolate single DEG result data frame
+    Merge_DEGs <- DEG_Results[[Single_Group]] %>% 
+      rownames_to_column()
+    
+    # Retain only defined DEGs from above
+    Merge_DEGs <- Merge_DEGs[which(Merge_DEGs$GENE %in% DEGs), c('rowname', 'log2FC')] %>%
+      setNames(c('rowname', Single_Group))
+    
+  })
+  
+  # Merge DEG data from each group into a single location
+  Merge_DEGs <- Reduce(function(x, y) merge(x, y, by = 'rowname'), Merge_DEGs)
+  colnames(Merge_DEGs)[1] <- 'GENEID'
+  Merge_DEGs <- merge(ENSEMBL_and_Symbol, Merge_DEGs, by = 'GENEID')
+  
+  # Calculate mean log2 FC data for any genes which appear more than once
+  # i.e. genes which are mapped to multiple locations but have the same gene name
+  Merge_DEGs <- Merge_DEGs %>% 
+    group_by(GENE) %>% 
+    summarize(across(colnames(Merge_DEGs)[3:ncol(Merge_DEGs)], mean))
+  
+  # Remove gene column and set rownames to gene name
+  Merge_DEGs <- data.frame(Merge_DEGs[-1], row.names = Merge_DEGs$GENE)
+  
+  ###############
+  
+  # Merge DEG p value data calculated in Differential Expression script
+  Merge_DEGs_P_Value <- lapply(input_list, function(Single_Group){
+    
+    # Isolate single DEG p value result data frame
+    Merge_DEGs_P_Value <- DEG_Results[[Single_Group]] %>% 
+      rownames_to_column()
+    
+    # Retain only defined DEG p value from above
+    Merge_DEGs_P_Value <- Merge_DEGs_P_Value[which(Merge_DEGs_P_Value$GENE %in% DEGs), c('rowname', 'adj.P.Val')] %>%
+      setNames(c('GENEID', Single_Group))
+    
+  })
+  
+  # Merge DEG p value data from each group into a single location
+  Merge_DEGs_P_Value <- Reduce(function(x, y) merge(x, y, by = 'GENEID'), Merge_DEGs_P_Value)
+  Merge_DEGs_P_Value <- merge(ENSEMBL_and_Symbol, Merge_DEGs_P_Value, by = 'GENEID')
+  
+  # Calculate mean p value for any genes which appear more than once
+  # i.e. genes which are mapped to multiple locations but have the same gene name
+  Merge_DEGs_P_Value <- Merge_DEGs_P_Value %>% 
+    group_by(GENE) %>% 
+    summarize(across(colnames(Merge_DEGs_P_Value)[3:ncol(Merge_DEGs_P_Value)], mean))
+  
+  # Remove gene column and set rownames to gene name
+  Merge_DEGs_P_Value <- data.frame(Merge_DEGs_P_Value[-1], row.names = Merge_DEGs_P_Value$GENE)
+  
+  # Pivot fold change data longer
+  pivot_FC <- Merge_DEGs %>% 
+    rownames_to_column() %>% 
+    pivot_longer(cols = colnames(Merge_DEGs), 
+                 values_to = 'FC', 
+                 names_to = 'Group')
+  
+  # Pivot p value data longer
+  pivot_P <- Merge_DEGs_P_Value %>% 
+    rownames_to_column() %>% 
+    pivot_longer(cols = colnames(Merge_DEGs_P_Value), 
+                 values_to = 'P_val', 
+                 names_to = 'Group')
+  
+  # Merge fold change and p value data together
+  DEG_Data <- merge(pivot_FC, pivot_P, by = c('rowname', 'Group'))
+  
+  # Determine significant vs non-significance based on p value and absolute fold change
+  DEG_Data <- DEG_Data %>% 
+    mutate(Significant = 
+             case_when(P_val < 0.1 & abs(FC) >= 1.5 ~ as.numeric(1),
+                       P_val >= 0.1 | abs(FC) < 1.5 ~ as.numeric(0)))
+  
+  # Pivot data wide to show significance of each gene by each exposure group
+  DEG_Data <- DEG_Data[, c('rowname', 'Group', 'Significant')] %>% 
+    pivot_wider(names_from = 'Group', 
+                values_from = 'Significant')
+  
+  # Set rownames to gene name and remove from data frame
+  DEG_Data <- data.frame(DEG_Data[-1], 
+                         row.names = DEG_Data$rowname)
+  
+  # Rearrange significance designation to match p values
+  DEG_Data <- DEG_Data[rownames(Merge_DEGs_P_Value), ]
+  
+  # Count the number of significance designations for each row (gene)
+  # i.e. a count of 3 means 3 groups show significance (significance value of 1)
+  Merge_DEGs_P_Value$Count <- apply(DEG_Data, 1, function(x) sum(x == 1))
+
+  # Remove genes which have 0 significance designators
+  Merge_DEGs_P_Value <- Merge_DEGs_P_Value[which(Merge_DEGs_P_Value$Count != 0), ]
+  
+  # Reorder data by descending of significance designators
+  Merge_DEGs_P_Value <- Merge_DEGs_P_Value[order(-Merge_DEGs_P_Value$Count, rownames(Merge_DEGs_P_Value)), ]
+  
+  # Reorder rows to match gene order of other data frames
+  Merge_DEGs <- Merge_DEGs[rownames(Merge_DEGs_P_Value), ]
+  colnames(Merge_DEGs) <- group_names
+  
+  ###############
+
+  # Set color palette
+  myCol1 <- colorRamp2(c(-5, -2.5, 0, 2.5, 5), hcl_palette = 'blue-red')
+
+  # Add row and column annotation padding
+  ht_opt$ROW_ANNO_PADDING = unit(5, "mm")
+  ht_opt$COLUMN_ANNO_PADDING = unit(5, "mm")
+
+  # Set up conditionals for plotting. If > 100 rows, plot will be rotated
+  text_size = ifelse(nrow(Merge_DEGs) < 200, 15, 5)
+  group_size = ifelse(nrow(Merge_DEGs) < 200, 20, 10)
+  cell_text_size = ifelse(nrow(Merge_DEGs) < 200, 15, 8)
+
+  # Create heatmap for fold change data with text inside cells representing p values of that gene
+  hmap <- Heatmap(as.matrix(Merge_DEGs),
+
+                  rect_gp = gpar(col = "black"),
+                  border = TRUE,
+                  width =  unit(75, 'mm'),
+                  height =  unit(1000, 'mm'),
+                  cluster_row_slices = FALSE,
+                  row_gap = unit(2.5, "mm"),
+                  row_split = -Merge_DEGs_P_Value$Count,
+
+                  name = 'Log2 Fold Change',
+
+                  col = myCol1,
+                  na_col = 'black',
+
+                  cell_fun = function(j, i, x, y, width, height, fill) {
+                    grid.text(sprintf("%.5s", Merge_DEGs[i, j]),
+                              x,
+                              y,
+                              gp = gpar(fontsize = cell_text_size,
+
+                                        col = ifelse((Merge_DEGs_P_Value[i, j] >= 0.1 | abs(Merge_DEGs[i, j]) < 1.5),
+                                                     ifelse((Merge_DEGs_P_Value[i, j] < 0.1),
+                                                            'purple3',
+                                                            'grey40'),
+                                                     'black'),
+
+                                        fontface = 'bold.italic'))},
+
+                  # row (gene) parameters
+                  cluster_rows = TRUE,
+                  show_row_dend = FALSE,
+                  row_title = NULL,
+                  show_row_names = TRUE,
+                  row_dend_side = 'right',
+                  row_names_gp = gpar(fontsize = text_size, fontface = 'bold'),
+                  row_names_rot = 0,
+                  row_names_side = 'left',
+
+                  # column (sample) parameters
+                  cluster_columns = FALSE,
+                  show_column_dend = FALSE,
+                  column_names_gp = gpar(fontsize = group_size, fontface = 'bold'),
+                  column_names_rot = 45,
+                  column_names_side = 'bottom',
+                  show_column_names = TRUE)
+
+  # If the current input data is Viral Data, save the heatmap
+  if(data_name == 'Viral Data'){
+
+    lgd = packLegend(
+      Legend(title = "Log2 FC",
+             at = c(-5, -2.5, 0, 2.5, 5),
+             col_fun = myCol1,
+             legend_height = unit(50, "mm"),
+             title_gap = unit(5, "mm"),
+             title_position = c("topcenter"),
+             labels_gp = gpar(fontsize = 16),
+             title_gp = gpar(fontsize = 20,
+                             fontface = "bold")))
+
+    png(file = paste0(data_name,
+                      ' Heatmap.png'),
+        width = 500,
+        height = 1100,
+        unit = 'mm',
+        res = 300)
+
+    draw(hmap,
+         show_heatmap_legend = FALSE)
+
+    draw(lgd, x = unit(315, 'mm'), y = unit(550, 'mm'))
+
+    dev.off()
+
+  }
+
+  # If data is anything else, calculate the correlation coefficients and save the combined heatmaps
+  else{
+
+    Cor_Merge_DEGs <- Merge_DEGs %>%
+      rownames_to_column()
+
+    colnames(Cor_Merge_DEGs)[1] <- 'GENE'
+
+    Cor_Merge_DEGs <- Cor_Merge_DEGs %>%
+      pivot_longer(cols = colnames(Cor_Merge_DEGs)[2:ncol(Cor_Merge_DEGs)],
+                   names_to = 'exposure',
+                   values_to = 'log2FC')
+
+    Cor_Merge_DEGs <- merge(Group_data,
+                            Cor_Merge_DEGs,
+                            by = 'exposure')
+
+    Cor_Merge_DEGs <- Cor_Merge_DEGs %>%
+      pivot_wider(names_from = 'GENE',
+                  values_from = 'log2FC')
+    
+    
+    # Calculate correlation between each significantly differentially expressed gene and each PM component
+    Correlation <- lapply(colnames(Cor_Merge_DEGs)[2:10], function(PM_component){
+
+      Correlation <- lapply(colnames(Cor_Merge_DEGs)[11:ncol(Cor_Merge_DEGs)], function(GOI){
+
+        cor <- cor.test(x = as.numeric(unlist(Cor_Merge_DEGs[, PM_component])),
+                        y = as.numeric(unlist(Cor_Merge_DEGs[, GOI])))
+
+        # Isolate correlation coefficient
+        coefficient <- cor[["estimate"]][["cor"]]
+
+      })
+
+      # Bind results together
+      Correlation <- do.call(rbind, Correlation)
+      rownames(Correlation) <- colnames(Cor_Merge_DEGs)[11:ncol(Cor_Merge_DEGs)]
+      Correlation
+
+    })
+
+    # Bind results together
+    Correlation <- do.call(cbind, Correlation) %>% data.frame()
+    colnames(Correlation) <- colnames(Cor_Merge_DEGs)[2:10]
+    Correlation <- Correlation[rownames(Merge_DEGs), ]
+
+    #####################
+
+    # Calculate correlation p value between each significantly differentially expressed gene and each PM component
+    Correlation_p_value <- lapply(colnames(Cor_Merge_DEGs)[2:10], function(PM_component){
+
+      Correlation_p_value <- lapply(colnames(Cor_Merge_DEGs)[11:ncol(Cor_Merge_DEGs)], function(GOI){
+
+        cor <- cor.test(x = as.numeric(unlist(Cor_Merge_DEGs[, PM_component])),
+                        y = as.numeric(unlist(Cor_Merge_DEGs[, GOI])))
+
+        # Isolate p value to 3 sig figs
+        coefficient <- round(cor[["p.value"]], 3)
+
+      })
+
+      # Bind results together
+      Correlation_p_value <- do.call(rbind, Correlation_p_value)
+      Correlation_p_value <- p.adjust(Correlation_p_value, 'BH') %>% data.frame()
+      rownames(Correlation_p_value) <- colnames(Cor_Merge_DEGs)[11:ncol(Cor_Merge_DEGs)]
+      Correlation_p_value
+
+    })
+
+    # Bind results together
+    Correlation_p_value <- do.call(cbind, Correlation_p_value) %>% data.frame()
+    colnames(Correlation_p_value) <- colnames(Cor_Merge_DEGs)[2:10]
+    Correlation_p_value <- Correlation_p_value[rownames(Correlation), ]
+  
+    # Remove p values above 0.25 to remove from heatmap to prevent visual overload
+    Correlation_p_value[Correlation_p_value >= 0.25] <- ''
+
+    ##########
+
+    # Set color palette
+    myCol2 <- colorRamp2(c(-1, -0.5, 0, 0.5, 1), hcl_palette = 'RdBu', rev = TRUE)
+
+    # Create heatmap of correlation values between DE genes and PM components
+    # Values inside cells represent correlation p values
+    hmap2 <- Heatmap(as.matrix(Correlation),
+
+                     rect_gp = gpar(col = "black"),
+                     border = TRUE,
+                     width =  unit(125, 'mm'),
+                     height =  unit(1000, 'mm'),
+                     cluster_row_slices = FALSE,
+                     row_gap = unit(2.5, "mm"),
+                     row_split = -Merge_DEGs_P_Value$Count,
+
+                     name = 'Correlation',
+
+                     cell_fun = function(j, i, x, y, width, height, fill) {
+                       grid.text(sprintf("%.5s", Correlation_p_value[i, j]),
+                                 x,
+                                 y,
+                                 gp = gpar(fontsize = cell_text_size,
+
+                                           col = ifelse(abs(Correlation)[i, j] > 0.75,
+                                                        'white',
+                                                        'black'),
+
+                                           fontface = 'bold'))},
+
+                     col = myCol2,
+                     na_col = 'black',
+
+                     # row (gene) parameters
+                     cluster_rows = FALSE,
+                     show_row_dend = FALSE,
+                     row_title_gp = gpar(fontsize = 12,  fontface = 'bold'),
+                     show_row_names = TRUE,
+                     row_names_rot = 0,
+                     row_names_gp = gpar(fontsize = text_size, fontface = 'bold'),
+                     row_names_side = 'left',
+
+                     # column (sample) parameters
+                     cluster_columns = TRUE,
+                     show_column_dend = TRUE,
+                     column_names_gp = gpar(fontsize = group_size, fontface = 'bold'),
+                     column_names_rot = 45,
+                     column_names_side = 'bottom',
+                     show_column_names = TRUE)
+
+    # Create legends for log2FC (first heatmap) and correlation (second heatmap)
+    lgd = packLegend(
+      Legend(title = "Log2 FC",
+             at = c(-5, -2.5, 0, 2.5, 5),
+             col_fun = myCol1,
+             legend_height = unit(75, "mm"),
+             title_gap = unit(7.5, "mm"),
+             title_position = c("topcenter"),
+             labels_gp = gpar(fontsize = 20),
+             title_gp = gpar(fontsize = 25,
+                             fontface = "bold")),
+
+      Legend(title = "\nCorrelation", c(-1, -0.5, 0, 0.5, 1),
+             col_fun = myCol2,
+             legend_height = unit(75, "mm"),
+             title_gap = unit(7.5, "mm"),
+             title_position = c("topcenter"),
+             labels_gp = gpar(fontsize = 20),
+             title_gp = gpar(fontsize = 25,
+                             fontface = "bold")))
+
+    # Combine heatmap 1 and 2 together
+    combined_heamap = hmap + hmap2
+
+    png(file = paste0(data_name,
+                      ' Heatmap.png'),
+        width = 500,
+        height = 1100,
+        unit = 'mm',
+        res = 300)
+
+    draw(combined_heamap,
+         gap = unit(2.5, "mm"),
+         show_heatmap_legend = FALSE)
+
+    draw(lgd, x = unit(400, 'mm'), y = unit(550, 'mm'))
+
+    dev.off()
+  }
+  
+  # Change p value data to significant vs non-significant designator
+  Merge_DEGs_P_Value <- Merge_DEGs_P_Value[1:ncol(Merge_DEGs_P_Value) - 1] %>% 
+    mutate(across(everything(), ~ ifelse(. < 0.1, 'Significant', 'Not Significant')))
+  
+  # Merge p value and log2FC data together
+  DEGs_for_Export <- merge(Merge_DEGs_P_Value, Merge_DEGs, by = 0)
+  
+  DEGs_for_Export <- data.frame(DEGs_for_Export[-1],
+                                row.names = DEGs_for_Export$Row.names) %>%
+
+    setNames(c(paste0(group_names, ' Significance'),
+               paste0(group_names, ' Fold Change')))
+  
+  # Write results to a .csv file
+  write.csv(file = paste0(export_name, '.csv'), DEGs_for_Export)
+  
+}
+```
+
+### Load differential expression data and create heatmaps and Supplemental Files
+
+```{r}
+load('DEG_Results.RData')
+
+ENSEMBL_and_Symbol <- DEG_Results[[1]] %>% 
+  rownames_to_column()
+
+ENSEMBL_and_Symbol <- ENSEMBL_and_Symbol[, c('GENEID', 'GENE')]
+ENSEMBL_and_Symbol$GENE[ENSEMBL_and_Symbol$GENE == ''] = ENSEMBL_and_Symbol$GENEID[ENSEMBL_and_Symbol$GENE == '']
+
+####################################
+
+PM_list <- c("Spring PM, 2h", "Summer PM, 2h", "Fall PM, 2h", "Winter PM, 2h")
+
+PM <- Make_heatmap(PM_list, 
+                   'Figure 3A', 
+                   c('Spring', 'Summer', 'Fall', 'Winter'), 
+                   'Supplemental_File_SF2')
+
+####
+
+Viral_list <- c("2h Post Infection", "24h Post Infection", "24h vs 2h Post Infection")
+
+Viral <- Make_heatmap(Viral_list, 
+                      'Viral Data', 
+                      c('2 Hours Post Infection', '24 Hours Post Infection', '24 Hours vs 2 Hours Post Infection'), 
+                      'Supplemental_File_SF1')
+
+####
+
+PM_Viral_list <- c("Spring PM + Influenza vs Vehicle + Influenza, 2h", "Summer PM + Influenza vs Vehicle + Influenza, 2h", 
+                   "Fall PM + Influenza vs Vehicle + Influenza, 2h", "Winter PM + Influenza vs Vehicle + Influenza, 2h")
+
+PM_Viral <- Make_heatmap(PM_Viral_list, 
+                         'Figure 5A', 
+                         c('Spring', 'Summer','Fall', 'Winter'),
+                         'Supplemental_File_SF3')
+```

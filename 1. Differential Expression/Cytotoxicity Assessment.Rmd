@@ -1,0 +1,83 @@
+---
+title: "Cytotoxicity Assessment"
+author: "Timothy Smyth"
+date: "2025-08-25"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Clear the environment and import required packages
+
+```{r}
+rm(list = ls(all.names = TRUE)) # clears global environ.
+
+library(tidyverse)
+library(ggplot2)
+```
+
+### Import cytotoxicity data and isolate 2 and 24 hour cytotoxicity data
+
+```{r}
+Cytotoxicity <- read.csv('Cytotoxicity.csv')
+
+Cytotoxicity <- Cytotoxicity[which(Cytotoxicity$timepoint != '48'), ] %>% 
+  setNames(c('sample_number', 'donor', 'timepoint', 'sex', 'exposure', 'infection', 'cytotoxicity'))
+
+Cytotoxicity$group <- paste(Cytotoxicity$exposure, Cytotoxicity$infection, sep = '_')
+```
+
+### Create Supplemental Figure S1 A and B comparing cytotoxicity at 2 and 24 hours for matched samples
+
+```{r}
+lapply(unique(Cytotoxicity$infection), function(Infection){
+  
+  Plot_data <- Cytotoxicity[which(Cytotoxicity$infection == Infection), ]
+  
+  plot <- ggplot(data = Plot_data, aes(x = as.character(timepoint), y = cytotoxicity)) +
+  
+  geom_bar(aes(fill = as.character(timepoint)),
+           stat = "summary",
+           position = position_dodge(),
+           width = 0.75) +
+    
+    geom_errorbar(stat = "summary",
+                  width = 0.2,
+                  position = position_dodge(0.9)) +
+    
+    geom_jitter(stat = 'identity', 
+                width = 0.25) +
+    
+    ggpubr::stat_compare_means(method = "t.test", paired = TRUE) +
+    
+    labs(title = paste0(Infection, ' Cytotoxicity'), 
+         x = 'Timepoint', 
+         y = 'Cytotoxicity (%)') +
+    
+    facet_grid(~ exposure) +
+    
+    theme_bw() +
+    
+    ylim(-5, 30) +
+    
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          title = element_text(size = 14, face = 'bold'),
+          axis.title = element_text(size = 14, face = 'bold'), 
+          axis.text = element_text(size = 12), 
+          legend.position = "none", 
+          strip.text.x = element_text(size = 12))
+  
+  png(filename = paste0(Infection, ' Cytotoxicity.png'),  
+      width = 200,
+      height = 125,
+      unit = 'mm',
+      res = 300)
+  
+  print(plot)
+  
+  dev.off()
+  
+})
+```
